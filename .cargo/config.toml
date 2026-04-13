@@ -1,0 +1,11 @@
+[build]
+target = "riscv32im-unknown-none-elf"
+
+[target.riscv32im-unknown-none-elf]
+linker = "rust-lld"
+rustflags = [
+    "-C",
+    "link-arg=--gc-sections",
+    "-C",
+    "code-model=medany",
+]

@@ -1,6 +1,14 @@
 [package]
 name = "rv-bcs"
 version = "0.1.0"
-edition = "2024"
+description = "Binary Canonical Serialization (BCS) for RISC-V32 zkVM targets"
+license = "Apache-2.0"
+edition = "2021"
 
 [dependencies]
+serde = { version = "1.0.145", default-features = false, features = ["derive", "alloc"] }
+thiserror = { version = "2.0.18", default-features = false }
+
+[features]
+default = []
+std = []
