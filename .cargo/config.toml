@@ -1,11 +1,9 @@
 [build]
-target = "riscv32im-unknown-none-elf"
-
-[target.riscv32im-unknown-none-elf]
-linker = "rust-lld"
+target = "riscv32i-unknown-none-elf"
 rustflags = [
-    "-C",
-    "link-arg=--gc-sections",
-    "-C",
-    "code-model=medany",
+  "-C", "target-feature=+m,-unaligned-scalar-mem,+relax,+zimop",
+  "-C", "link-arg=-Tscripts/lds/memory.x",
+  "-C", "link-arg=-Tscripts/lds/link.x",
+  "-C", "link-arg=--save-temps",
+  "-C", "force-frame-pointers",
 ]
