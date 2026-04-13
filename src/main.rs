@@ -18,6 +18,7 @@ extern "C" {
 }
 
 core::arch::global_asm!(include_str!("../scripts/asm/asm_reduced.S"));
+use rv_bcs::{from_bytes, to_bytes};
 
 #[no_mangle]
 extern "C" fn eh_personality() {}
@@ -28,32 +29,59 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NullAllocator;
+pub struct BumpAllocator;
 
-unsafe impl core::alloc::GlobalAlloc for NullAllocator {
-    unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
-        // panic!("use of global null allocator");
-        core::hint::unreachable_unchecked()
+static mut HEAP_NEXT: usize = 0;
+
+#[inline(always)]
+const fn align_up(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
+}
+
+unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let heap_start = core::ptr::addr_of!(_sheap) as usize;
+        let heap_end = core::ptr::addr_of!(_eheap) as usize;
+
+        if HEAP_NEXT == 0 {
+            HEAP_NEXT = heap_start;
+        }
+
+        let alloc_start = align_up(HEAP_NEXT, layout.align());
+        let Some(alloc_end) = alloc_start.checked_add(layout.size()) else {
+            return core::ptr::null_mut();
+        };
+
+        if alloc_end > heap_end {
+            return core::ptr::null_mut();
+        }
+
+        HEAP_NEXT = alloc_end;
+        alloc_start as *mut u8
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
-        // panic!("use of global null allocator");
-        core::hint::unreachable_unchecked()
-    }
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
 
     unsafe fn realloc(
         &self,
-        _ptr: *mut u8,
-        _layout: core::alloc::Layout,
-        _new_size: usize,
+        ptr: *mut u8,
+        layout: core::alloc::Layout,
+        new_size: usize,
     ) -> *mut u8 {
-        // panic!("use of global null allocator");
-        core::hint::unreachable_unchecked()
+        let Ok(new_layout) = core::alloc::Layout::from_size_align(new_size, layout.align()) else {
+            return core::ptr::null_mut();
+        };
+        let new_ptr = self.alloc(new_layout);
+        if new_ptr.is_null() {
+            return core::ptr::null_mut();
+        }
+        core::ptr::copy_nonoverlapping(ptr, new_ptr, core::cmp::min(layout.size(), new_size));
+        new_ptr
     }
 }
 
 #[global_allocator]
-static GLOBAL_ALLOCATOR_PLACEHOLDER: NullAllocator = NullAllocator;
+static GLOBAL_ALLOCATOR_PLACEHOLDER: BumpAllocator = BumpAllocator;
 
 #[link_section = ".init.rust"]
 #[export_name = "_start_rust"]
@@ -81,9 +109,7 @@ pub struct MachineTrapFrame {
 #[link_section = ".trap.rust"]
 #[export_name = "_machine_start_trap_rust"]
 pub extern "C" fn machine_start_trap_rust(_trap_frame: *mut MachineTrapFrame) -> usize {
-    {
-        unsafe { core::hint::unreachable_unchecked() }
-    }
+    0
 }
 
 /// Set data as a output of the current execution.
@@ -149,8 +175,8 @@ pub fn zksync_os_finish_success_extended(data: &[u32; 16]) -> ! {
 /// Set data as a output of the current execution. Unsatisfiable in circuits
 #[inline(never)]
 pub fn zksync_os_finish_error() -> ! {
-    unsafe {
-        core::hint::unreachable_unchecked();
+    loop {
+        core::hint::spin_loop();
     }
 }
 
@@ -188,9 +214,29 @@ pub fn csr_read_word() -> u32 {
 unsafe fn workload() -> ! {
     let a: [u32; 16] = core::array::from_fn(|_| csr_read_word());
     let b: [u32; 16] = core::array::from_fn(|_| csr_read_word());
-    assert_eq!(a, b);
 
-    zksync_os_finish_success_extended(&a);
+    let encoded_a = match to_bytes(&a) {
+        Ok(bytes) => bytes,
+        Err(_) => zksync_os_finish_error(),
+    };
+    let encoded_b = match to_bytes(&b) {
+        Ok(bytes) => bytes,
+        Err(_) => zksync_os_finish_error(),
+    };
+
+    let decoded_a: [u32; 16] = match from_bytes(&encoded_a) {
+        Ok(value) => value,
+        Err(_) => zksync_os_finish_error(),
+    };
+    let decoded_b: [u32; 16] = match from_bytes(&encoded_b) {
+        Ok(value) => value,
+        Err(_) => zksync_os_finish_error(),
+    };
+
+    assert_eq!(a, b);
+    assert_eq!(decoded_a, decoded_b);
+
+    zksync_os_finish_success_extended(&decoded_a);
 }
 
 #[inline(never)]
