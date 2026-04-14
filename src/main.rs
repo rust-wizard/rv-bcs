@@ -284,17 +284,83 @@ fn log_bytes_via_csr(bytes: &[u8]) {
 }
 
 unsafe fn workload() -> ! {
-    // let a: [u32; 16] = core::array::from_fn(|_| csr_read_word());
-    // let b: [u32; 16] = core::array::from_fn(|_| csr_read_word());
+    // Fail-fast helper for serialization checks.
+    #[inline(always)]
+    fn check_serialized<T: serde::Serialize>(value: &T, expected: &[u8], tag: &str, passed: &mut u32) {
+        guest_log(tag);
+        let encoded = match to_bytes(value) {
+            Ok(bytes) => bytes,
+            Err(_) => zksync_os_finish_error(),
+        };
 
-    let some_data: Option<u8> = Some(8);
-    let encoded_bytes = match to_bytes(&some_data) {
-        Ok(bytes) => bytes,
+        if encoded.as_slice() != expected {
+            guest_log("[rv-bcs] serialization mismatch");
+            log_bytes_via_csr(&encoded);
+            zksync_os_finish_error();
+        }
+
+        *passed += 1;
+    }
+
+    let mut passed = 0u32;
+
+    // 1) Option Some
+    check_serialized(&Some(8u8), &[1, 8], "[rv-bcs] case: option_some", &mut passed);
+
+    // 2) Option None
+    check_serialized(&Option::<u8>::None, &[0], "[rv-bcs] case: option_none", &mut passed);
+
+    // 3) Fixed-length array [u16; 3]
+    check_serialized(
+        &[1u16, 2u16, 3u16],
+        &[1, 0, 2, 0, 3, 0],
+        "[rv-bcs] case: fixed_array_u16",
+        &mut passed,
+    );
+
+    // 4) Variable-length sequence via slice &[u16]
+    check_serialized(
+        &&[1u16, 2u16][..],
+        &[2, 1, 0, 2, 0],
+        "[rv-bcs] case: variable_slice_u16",
+        &mut passed,
+    );
+
+    // 5) Tuple (-1i8, "diem")
+    check_serialized(
+        &(-1i8, "diem"),
+        &[0xFF, 4, b'd', b'i', b'e', b'm'],
+        "[rv-bcs] case: tuple_i8_str",
+        &mut passed,
+    );
+
+    // 6) UTF-8 string
+    check_serialized(
+        &"çå∞≠¢õß∂ƒ∫",
+        &[
+            24, 0xc3, 0xa7, 0xc3, 0xa5, 0xe2, 0x88, 0x9e, 0xe2, 0x89, 0xa0, 0xc2, 0xa2, 0xc3,
+            0xb5, 0xc3, 0x9f, 0xe2, 0x88, 0x82, 0xc6, 0x92, 0xe2, 0x88, 0xab,
+        ],
+        "[rv-bcs] case: utf8_string",
+        &mut passed,
+    );
+
+    // 7) Hardcoded decode check (from deserializer example)
+    guest_log("[rv-bcs] case: decode_socket_tuple");
+    let decoded: ([u8; 4], u16) = match from_bytes(&[0x7f, 0x00, 0x00, 0x01, 0x41, 0x1f]) {
+        Ok(v) => v,
         Err(_) => zksync_os_finish_error(),
     };
-    log_bytes_via_csr(&encoded_bytes);
-    let output_words = encode_hex_for_output(&encoded_bytes);
-    zksync_os_finish_success_extended(&output_words);
+    if decoded.0 != [127, 0, 0, 1] || decoded.1 != 8001 {
+        guest_log("[rv-bcs] decode mismatch");
+        zksync_os_finish_error();
+    }
+    passed += 1;
+
+    // Return number of passed hardcoded cases.
+    let mut out = [0u32; 16];
+    out[0] = passed;
+    zksync_os_finish_success_extended(&out);
 }
 
 #[inline(never)]

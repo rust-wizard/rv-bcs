@@ -1,0 +1,10 @@
+[package]
+name = "x86"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[dev-dependencies]
+bcs = "0.1.6"
+serde = "1.0.145"
