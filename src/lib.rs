@@ -310,9 +310,6 @@ mod de;
 mod error;
 mod ser;
 
-#[cfg(feature = "std")]
-pub mod test_helpers;
-
 /// Variable length sequences in BCS are limited to max length of 2^31 - 1.
 pub const MAX_SEQUENCE_LENGTH: usize = (1 << 31) - 1;
 
