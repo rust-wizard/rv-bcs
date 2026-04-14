@@ -197,6 +197,27 @@ pub fn csr_write_word(word: usize) {
     }
 }
 
+/// QuasiUART start marker recognized by the simulator host logger.
+const QUASI_UART_HELLO: u32 = u32::MAX;
+
+/// Send a log line to host console using QuasiUART framing on CSR 0x7c0.
+fn guest_log(msg: &str) {
+    let bytes = msg.as_bytes();
+    let len = bytes.len();
+    csr_write_word(QUASI_UART_HELLO as usize);
+    csr_write_word(len.next_multiple_of(4) / 4 + 1);
+    csr_write_word(len);
+
+    let mut i = 0usize;
+    while i < len {
+        let mut chunk = [0u8; 4];
+        let end = (i + 4).min(len);
+        chunk[..end - i].copy_from_slice(&bytes[i..end]);
+        csr_write_word(u32::from_le_bytes(chunk) as usize);
+        i = end;
+    }
+}
+
 #[inline(always)]
 pub fn csr_read_word() -> u32 {
     let mut output;
@@ -211,32 +232,69 @@ pub fn csr_read_word() -> u32 {
     output
 }
 
+#[inline(always)]
+const fn to_hex_ascii(nibble: u8) -> u8 {
+    match nibble {
+        0..=9 => b'0' + nibble,
+        _ => b'a' + (nibble - 10),
+    }
+}
+
+#[inline(always)]
+fn encode_hex_for_output(bytes: &[u8]) -> [u32; 16] {
+    let mut out = [0u32; 16];
+    // Word 0 stores original byte length.
+    out[0] = bytes.len() as u32;
+
+    // Remaining 15 words store up to 30 input bytes as 60 ASCII hex chars.
+    let mut hex_index = 0usize;
+    for byte in bytes.iter().take(30) {
+        let hi = to_hex_ascii(byte >> 4);
+        let lo = to_hex_ascii(byte & 0x0f);
+        for ascii in [hi, lo] {
+            let word_idx = 1 + (hex_index / 4);
+            let shift = (hex_index % 4) * 8;
+            out[word_idx] |= (ascii as u32) << shift;
+            hex_index += 1;
+        }
+    }
+
+    out
+}
+
+#[inline(always)]
+fn log_bytes_via_csr(bytes: &[u8]) {
+    let mut hex_buf = [0u8; 128];
+    let max_bytes = core::cmp::min(bytes.len(), hex_buf.len() / 2);
+    for (i, byte) in bytes.iter().take(max_bytes).enumerate() {
+        hex_buf[2 * i] = to_hex_ascii(byte >> 4);
+        hex_buf[2 * i + 1] = to_hex_ascii(byte & 0x0f);
+    }
+
+    guest_log("[rv-bcs] encoded_bytes(hex):");
+    if let Ok(hex_str) = core::str::from_utf8(&hex_buf[..2 * max_bytes]) {
+        guest_log(hex_str);
+    } else {
+        guest_log("[rv-bcs] failed to format hex log");
+    }
+
+    if max_bytes < bytes.len() {
+        guest_log("[rv-bcs] encoded_bytes(hex) truncated");
+    }
+}
+
 unsafe fn workload() -> ! {
-    let a: [u32; 16] = core::array::from_fn(|_| csr_read_word());
-    let b: [u32; 16] = core::array::from_fn(|_| csr_read_word());
+    // let a: [u32; 16] = core::array::from_fn(|_| csr_read_word());
+    // let b: [u32; 16] = core::array::from_fn(|_| csr_read_word());
 
-    let encoded_a = match to_bytes(&a) {
+    let some_data: Option<u8> = Some(8);
+    let encoded_bytes = match to_bytes(&some_data) {
         Ok(bytes) => bytes,
         Err(_) => zksync_os_finish_error(),
     };
-    let encoded_b = match to_bytes(&b) {
-        Ok(bytes) => bytes,
-        Err(_) => zksync_os_finish_error(),
-    };
-
-    let decoded_a: [u32; 16] = match from_bytes(&encoded_a) {
-        Ok(value) => value,
-        Err(_) => zksync_os_finish_error(),
-    };
-    let decoded_b: [u32; 16] = match from_bytes(&encoded_b) {
-        Ok(value) => value,
-        Err(_) => zksync_os_finish_error(),
-    };
-
-    assert_eq!(a, b);
-    assert_eq!(decoded_a, decoded_b);
-
-    zksync_os_finish_success_extended(&decoded_a);
+    log_bytes_via_csr(&encoded_bytes);
+    let output_words = encode_hex_for_output(&encoded_bytes);
+    zksync_os_finish_success_extended(&output_words);
 }
 
 #[inline(never)]
